@@ -50,7 +50,7 @@ def finish_and_save(image_name):
     st.session_state.batch_annotations[image_name] = st.session_state[f"radio_{image_name}"]
 
     batch_images = load_batch_data(st.session_state.current_batch)
-    if len(st.session_state.batch_annotations) < len(batch_images):
+    if len(st.session_state.batch_annotations) < len(batch_images) or None in st.session_state.batch_annotations.values():
         st.error("⚠️ Error: Not all images in this batch have a score. Please use the Previous button to ensure no images were skipped.")
         return
     
@@ -145,7 +145,7 @@ elif st.session_state.page == 'labeling':
 
     with col_radio:
         st.subheader("Corrosion Assessment")
-        saved_score = st.session_state.batch_annotations.get(current_image_name, 0)
+        saved_score = st.session_state.batch_annotations.get(current_image_name, None)
 
         st.radio(
             "Select severity score:",
