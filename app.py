@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import requests
 from huggingface_hub import hf_hub_download, login
-login()
 
 st.set_page_config(page_title="Corrosion Labeling Tool", layout="wide")
 
@@ -20,6 +19,8 @@ if 'page' not in st.session_state:
     st.session_state.page = 'login'
 if 'current_batch' not in st.session_state:
     st.session_state.current_batch = None
+if 'current_cycle' not in st.session_state:
+    st.session_state.current_cycle = None
 if 'current_image_index' not in st.session_state:
     st.session_state.current_image_index = 0
 if 'batch_annotations' not in st.session_state:
@@ -28,10 +29,16 @@ if 'batch_annotations' not in st.session_state:
 def get_next_batch():
     try:
         response = requests.get("https://script.google.com/macros/s/AKfycbz3lUi7brxYAEugXZ6A7WnqlgObUzoT8n3oeM84da6yE6L3-FrH-8EaFfDGAA9_tFGoiw/exec")
-        return int(response.text)
+        data = response.json()
+
+        if "error" in data:
+            st.warning(data["error"])
+            return None, None
+        
+        return int(data["batch"]), int(data["cycle"])
     except Exception as e:
         st.error(f"Could not connect to database: {e}")
-        return 0
+        return None, None
 
 
 def go_previous(image_name):
@@ -57,6 +64,7 @@ def finish_and_save(image_name):
     rows_to_add = []
     for filename, final_score in st.session_state.batch_annotations.items():
         rows_to_add.append({
+            "Cycle": st.session_state.current_cycle,
             "Expert_Username": st.session_state.user,
             "Batch": st.session_state.current_batch,
             "Filename": filename,
@@ -70,7 +78,10 @@ def finish_and_save(image_name):
             response = requests.post(GOOGLE_WEB_APP_URL, json=rows_to_add)
             if response.text == "Success":
                 st.success("Annotations saved successfully!")
-                st.session_state.current_batch = get_next_batch()
+
+                next_batch, next_cycle = get_next_batch()
+                st.session_state.current_batch = next_batch
+                st.session_state.current_cycle = next_cycle
                 st.session_state.current_image_index = 0
                 st.session_state.batch_annotations = {}
             else:
@@ -96,12 +107,15 @@ if st.session_state.page == 'login':
         else:
             st.session_state.user = expert_username.strip()
             with st.spinner("Assigning you a batch..."):
-                st.session_state.current_batch = get_next_batch()
-
-            st.session_state.current_image_index = 0
-            st.session_state.batch_annotations = {}
-            st.session_state.page = 'labeling'
-            st.rerun()
+                assigned_batch, assigned_cycle = get_next_batch()
+            
+            if assigned_batch is not None:
+                st.session_state.current_batch = assigned_batch
+                st.session_state.current_cycle = assigned_cycle
+                st.session_state.current_image_index = 0
+                st.session_state.batch_annotations = {}
+                st.session_state.page = 'labeling'
+                st.rerun()
 
 elif st.session_state.page == 'labeling':
     batch_num = st.session_state.current_batch
@@ -126,7 +140,8 @@ elif st.session_state.page == 'labeling':
         img_path = hf_hub_download(
             repo_id=HF_REPO_ID,
             filename=f"{current_image_name}.png",
-            repo_type="dataset"
+            repo_type="dataset",
+            token=st.secrets["HF_TOKEN"]
         )
         st.image(img_path, use_column_width=True)
 
