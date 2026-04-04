@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-from huggingface_hub import hf_hub_download, login
+from huggingface_hub import hf_hub_download
 
 st.set_page_config(page_title="Corrosion Labeling Tool", layout="wide")
 
@@ -26,19 +26,21 @@ if 'current_image_index' not in st.session_state:
 if 'batch_annotations' not in st.session_state:
     st.session_state.batch_annotations = {}
 
-def get_next_batch():
+def get_next_batch(username=""):
     try:
-        response = requests.get("https://script.google.com/macros/s/AKfycbz3lUi7brxYAEugXZ6A7WnqlgObUzoT8n3oeM84da6yE6L3-FrH-8EaFfDGAA9_tFGoiw/exec")
+        GOOGLE_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz3lUi7brxYAEugXZ6A7WnqlgObUzoT8n3oeM84da6yE6L3-FrH-8EaFfDGAA9_tFGoiw/exec"
+        url_with_user = f"{GOOGLE_WEB_APP_URL}?username={username}"
+        response = requests.get(url_with_user)
         data = response.json()
 
         if "error" in data:
             st.warning(data["error"])
-            return None, None
+            return None, None, 0
         
-        return int(data["batch"]), int(data["cycle"])
+        return int(data["batch"]), int(data["cycle"]), int(data.get("userCount", 0))
     except Exception as e:
         st.error(f"Could not connect to database: {e}")
-        return None, None
+        return None, None, 0
 
 
 def go_previous(image_name):
@@ -78,12 +80,14 @@ def finish_and_save(image_name):
             response = requests.post(GOOGLE_WEB_APP_URL, json=rows_to_add)
             if response.text == "Success":
                 st.success("Annotations saved successfully!")
-
-                next_batch, next_cycle = get_next_batch()
-                st.session_state.current_batch = next_batch
-                st.session_state.current_cycle = next_cycle
-                st.session_state.current_image_index = 0
-                st.session_state.batch_annotations = {}
+                st.session_state.completed_count += 1
+                next_batch, next_cycle, _ = get_next_batch(st.session_state.user)
+                if next_batch is not None:
+                    st.session_state.current_batch = next_batch
+                    st.session_state.current_cycle = next_cycle
+                    st.session_state.current_image_index = 0
+                    st.session_state.batch_annotations = {}
+                    st.rerun()
             else:
                 st.error("Failed to save. Please try again.")
         except Exception as e:
@@ -107,11 +111,12 @@ if st.session_state.page == 'login':
         else:
             st.session_state.user = expert_username.strip()
             with st.spinner("Assigning you a batch..."):
-                assigned_batch, assigned_cycle = get_next_batch()
+                assigned_batch, assigned_cycle, historical_count= get_next_batch(st.session_state.user)
             
             if assigned_batch is not None:
                 st.session_state.current_batch = assigned_batch
                 st.session_state.current_cycle = assigned_cycle
+                st.session_state.completed_count = historical_count
                 st.session_state.current_image_index = 0
                 st.session_state.batch_annotations = {}
                 st.session_state.page = 'labeling'
@@ -121,30 +126,46 @@ elif st.session_state.page == 'labeling':
     batch_num = st.session_state.current_batch
     img_idx = st.session_state.current_image_index
     batch_images = load_batch_data(batch_num)
-    current_image_name = batch_images[img_idx-1]
 
-    col_quit, col_prog = st.columns([1, 3])
-    with col_quit:
-        if st.button("🚪 Save & Exit for Now"):
-            st.session_state.page = 'login'
-            st.rerun()
+    current_image_name = batch_images[img_idx]
+
+    col_prog, col_count = st.columns([3, 1])
     with col_prog:
+        st.write("")
         st.progress((img_idx) / len(batch_images), text=f"Batch {batch_num:03d} | Image {img_idx + 1} of {len(batch_images)}")
+    with col_count:
+        st.metric(label="Total Batches Completed", value=st.session_state.completed_count)
 
     st.info("""
     **EN:** In the images are shown cementitious composite specimens, which may or may not present visible signs of surface corrosion. Please rate each image on a 0–3 scale as follows:  
     **IT:** Nelle immagini sono mostrati provini in composito cementizio, che possono presentare o meno segni visibili di corrosione superficiale. Si prega di valutare ciascuna immagine su una scala 0–3 come segue:
     """)
 
+   # 3. UPDATED IMAGE LOADER: Native Python retry loop
     with st.spinner("Loading image..."):
-        img_path = hf_hub_download(
-            repo_id=HF_REPO_ID,
-            filename=f"{current_image_name}.png",
-            repo_type="dataset",
-            token=st.secrets["HF_TOKEN"]
-        )
-        st.image(img_path, use_column_width=True)
+        import time # We import time here just for the 1-second delay
+        
+        img_path = None
+        for attempt in range(3):
+            try:
+                img_path = hf_hub_download(
+                    repo_id=HF_REPO_ID,
+                    filename=f"{current_image_name}.png",
+                    repo_type="dataset",
+                    token=st.secrets["HF_TOKEN"],
+                    force_download=True
+                )
+                break # If it succeeds, immediately break out of the loop!
+            except Exception as e:
+                if attempt < 2: # If it fails on try 1 or 2, wait 1 second and loop again
+                    time.sleep(1)
+                else: # If it fails on try 3, show the error
+                    st.error("⚠️ Network error loading image. Please refresh the page.")
 
+        # If the loop finished and we successfully got the image path, display it
+        if img_path:
+            st.image(img_path, use_container_width=True)
+        
     st.divider()
 
     col_legend, col_radio = st.columns([1, 2])
@@ -174,7 +195,7 @@ elif st.session_state.page == 'labeling':
     st.write("")
 
 
-    nav_col1, nav_col2 = st.columns(2)
+    nav_col1, nav_col2, nav_col3= st.columns(3)
 
     with nav_col1:
         st.button(
@@ -204,3 +225,7 @@ elif st.session_state.page == 'labeling':
                 width=150,
                 
             )
+    with nav_col3:
+        if st.button("🚪 Save & Exit for Now", use_container_width=True):
+            st.session_state.page = 'login'
+            st.rerun()
